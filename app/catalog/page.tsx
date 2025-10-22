@@ -378,8 +378,15 @@ export default function CatalogPage() {
       setShowConfirmDialog(false)
       setIsAware(false)
 
-      // Redirecionar para a página de confirmação
-      router.push(`/confirmed/${customerData.orderNumber}`)
+      // Redirecionar para o WhatsApp com a mensagem
+      const whatsappNumber = '5518998048419'
+      const whatsappMessage = encodeURIComponent(message)
+      const whatsappUrl = `https://wa.me/${whatsappNumber}?text=${whatsappMessage}`
+      
+      window.location.href = whatsappUrl
+
+      // Redirecionar para a página de confirmação (comentado)
+      // router.push(`/confirmed/${customerData.orderNumber}`)
     } catch (error) {
       console.error("Erro ao salvar pedido:", error)
       setError(error instanceof Error ? error.message : "Erro ao salvar pedido")
