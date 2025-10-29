@@ -11,7 +11,7 @@ A migração do sistema de carregamento de imagens da pasta local `/public/files
 Edite o arquivo `.env.local` na raiz do projeto e substitua os valores pelos seus dados reais:
 
 ```env
-# Google Cloud Storage Configuration 
+# Google Cloud Storage Configuration
 GCS_BUCKET_NAME=bucket-catalogo-interativo
 GCS_PROJECT_ID=seu-projeto-id-real
 GCS_CLIENT_EMAIL=sua-service-account@projeto.iam.gserviceaccount.com
