@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Download, Calendar, User, Package, ArrowLeft, AlertCircle, FolderOpen, Copy, Check, ChevronDown, Image, Search } from "lucide-react"
+import { Download, User, Package, ArrowLeft, AlertCircle, Copy, Check, ChevronDown, Search } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useToast } from "@/hooks/use-sonner-toast"
 import {
@@ -28,9 +28,40 @@ import {
 } from "@/components/ui/dialog"
 
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion"
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination"
 
-import { createOrder, getOrders, getOrdersByDate, getOrdersByCompletionDate, getOrdersByProductionDate, updateOrderStatus, getOrdersByOrderNumber, markOrdersInProduction } from "@/lib/database"
-import { NextResponse } from "next/server"
+import type { OrderStatusFilter, OrderPeriodField } from "@/lib/database"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+
+const PAGE_SIZE = 20
+const PERIOD_FIELD_OPTIONS: { value: OrderPeriodField; label: string }[] = [
+  { value: "created", label: "Criado" },
+  { value: "art_mounted", label: "Arte montada" },
+  { value: "in_production", label: "Em produção" },
+  { value: "finalized", label: "Finalizado" },
+  { value: "canceled", label: "Cancelado" },
+]
+
+const STATUS_OPTIONS: { key: OrderStatusFilter; label: string }[] = [
+  { key: "pending", label: "Pendentes" },
+  { key: "art_mounted", label: "Com arte montada" },
+  { key: "in_production", label: "Em produção" },
+  { key: "finalized", label: "Finalizados" },
+  { key: "canceled", label: "Cancelados" },
+]
 
 type Order = {
   id: string
@@ -44,162 +75,98 @@ type Order = {
   in_production: boolean
   in_production_at: string | null
   finalized_at: string | null
+  canceled_at: string | null
+}
+
+function getActiveStatusFilters(statusFilters: Record<OrderStatusFilter, boolean>): OrderStatusFilter[] {
+  return STATUS_OPTIONS.filter((o) => statusFilters[o.key]).map((o) => o.key)
 }
 
 export default function AdminPage() {
-  const [orders, setOrders] = useState<Order[]>([])
   const [filteredOrders, setFilteredOrders] = useState<Order[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [dateFilter, setDateFilter] = useState("")
-  const [completionDateFilter, setCompletionDateFilter] = useState("")
+  const [statusFilters, setStatusFilters] = useState<Record<OrderStatusFilter, boolean>>({
+    pending: true,
+    art_mounted: false,
+    in_production: false,
+    finalized: false,
+    canceled: false,
+  })
+  // Período: rascunho (inputs) vs aplicado (enviado à API só após "Filtrar")
+  const [periodFromDraft, setPeriodFromDraft] = useState("")
+  const [periodToDraft, setPeriodToDraft] = useState("")
+  const [periodFieldDraft, setPeriodFieldDraft] = useState<OrderPeriodField>("created")
+  const [periodFromApplied, setPeriodFromApplied] = useState("")
+  const [periodToApplied, setPeriodToApplied] = useState("")
+  const [periodFieldApplied, setPeriodFieldApplied] = useState<OrderPeriodField>("created")
   const [searchQuery, setSearchQuery] = useState("")
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [password, setPassword] = useState("")
+  const [searchInput, setSearchInput] = useState("")
   const router = useRouter()
   const toast = useToast()
-  const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "/catalogointerativo"
   const [downloadingOrder, setDownloadingOrder] = useState<string | null>(null)
-  // Definir o filtro 'Somente Pendentes' como padrão
-  const [filterPending, setFilterPending] = useState<"all" | "pending" | "completed" | "in_production" | "finalized">("pending")
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false)
   const [selectedOrderToClose, setSelectedOrderToClose] = useState<Order | null>(null)
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false)
+  const [selectedOrderToCancel, setSelectedOrderToCancel] = useState<Order | null>(null)
   const [selectedOrders, setSelectedOrders] = useState<string[]>([])
   const [productionDialogOpen, setProductionDialogOpen] = useState(false)
-  const [productionDateFilter, setProductionDateFilter] = useState("")
   const [selectedOrdersForList, setSelectedOrdersForList] = useState<string[]>([])
   const [listDialogOpen, setListDialogOpen] = useState(false)
-  const [finalizedDateFilter, setFinalizedDateFilter] = useState("")
   const [selectedOrdersDataForList, setSelectedOrdersDataForList] = useState<Order[]>([])
 
-  // Usar variável de ambiente pública para a senha (em produção, use autenticação adequada)
-  const ADMIN_PASSWORD = process.env.NEXT_PUBLIC_ADMIN_PASSWORD || ""
+  useEffect(() => {
+    loadFilteredOrders(1)
+  }, [])
 
   useEffect(() => {
-    if (isAuthenticated) {
-      loadOrders()
-    }
-  }, [isAuthenticated])
+    const active = getActiveStatusFilters(statusFilters)
+    if (active.length === 0) return
+    loadFilteredOrders(page)
+  }, [statusFilters, periodFromApplied, periodToApplied, periodFieldApplied, searchQuery, page])
 
-  useEffect(() => {
-    filterOrders()
-  }, [orders, dateFilter, completionDateFilter, productionDateFilter, filterPending, searchQuery, finalizedDateFilter])
-
-  // Limpar seleções quando os filtros mudam
   useEffect(() => {
     setSelectedOrders([])
     setSelectedOrdersForList([])
-  }, [dateFilter, completionDateFilter, productionDateFilter, filterPending, searchQuery, finalizedDateFilter])
+  }, [statusFilters, periodFromApplied, periodToApplied, periodFieldApplied, searchQuery])
 
-  const handleLogin = () => {
-    if (password === ADMIN_PASSWORD) {
-      setIsAuthenticated(true)
-    } else {
-      alert("Senha incorreta!")
-    }
-  }
-
-  const loadOrders = async () => {
+  const loadFilteredOrders = async (
+    pageNum: number = 1,
+    periodOverride?: { from: string; to: string; field: OrderPeriodField },
+  ) => {
+    const active = getActiveStatusFilters(statusFilters)
+    if (active.length === 0) return
+    const from = periodOverride?.from ?? periodFromApplied
+    const to = periodOverride?.to ?? periodToApplied
+    const field = periodOverride?.field ?? periodFieldApplied
     try {
       setError(null)
-      console.log("Carregando pedidos...")
-
-      const response = await fetch("/api/orders")
-
+      setLoading(true)
+      const params = new URLSearchParams()
+      active.forEach((s) => params.append("status", s))
+      if (from) params.set("periodFrom", from)
+      if (to) params.set("periodTo", to)
+      if (from && to) params.set("periodField", field)
+      if (searchQuery.trim()) params.set("search", searchQuery.trim())
+      params.set("page", String(pageNum))
+      params.set("pageSize", String(PAGE_SIZE))
+      const response = await fetch(`/api/orders?${params.toString()}`)
       if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(`Erro ao carregar pedidos: ${errorData.message || response.status}`)
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || `Erro ${response.status}`)
       }
-
       const data = await response.json()
-      console.log(`${data.length} pedidos carregados`)
-      setOrders(data || [])
-      setFilteredOrders(data || [])
+      setFilteredOrders(data.orders || [])
+      setTotal(data.total ?? 0)
+      setPage(data.page ?? pageNum)
     } catch (error) {
       console.error("Erro ao carregar pedidos:", error)
       setError(error instanceof Error ? error.message : "Erro desconhecido")
     } finally {
       setLoading(false)
     }
-  }
-
-  const filterOrders = async () => {
-    console.log("filterOrders chamada com:", {
-      dateFilter,
-      completionDateFilter,
-      productionDateFilter,
-      filterPending,
-      searchQuery
-    })
-
-    if (!dateFilter && !completionDateFilter && !productionDateFilter && !finalizedDateFilter && filterPending === "all" && !searchQuery) {
-      setFilteredOrders(orders)
-      return
-    }
-  
-    let filtered = orders
-  
-    if (productionDateFilter) {
-      try {
-        console.log("Filtrando por data de produção:", productionDateFilter)
-        const response = await fetch(`/api/orders?productionDate=${productionDateFilter}`)
-        if (!response.ok) throw new Error("Erro ao filtrar por data de produção")
-        filtered = await response.json()
-        console.log("Pedidos filtrados por data de produção:", filtered.length)
-      } catch (error) {
-        console.error("Erro ao filtrar por data de produção:", error)
-        setError(error instanceof Error ? error.message : "Erro desconhecido")
-        return
-      }
-    } else if (completionDateFilter) {
-      try {
-        const response = await fetch(`/api/orders?completionDate=${completionDateFilter}`)
-        if (!response.ok) throw new Error("Erro ao filtrar por data de conclusão")
-        filtered = await response.json()
-      } catch (error) {
-        console.error("Erro ao filtrar por data de conclusão:", error)
-        setError(error instanceof Error ? error.message : "Erro desconhecido")
-        return
-      }
-    } else if (dateFilter) {
-      try {
-        const response = await fetch(`/api/orders?date=${dateFilter}`)
-        if (!response.ok) throw new Error("Erro ao filtrar por data")
-        filtered = await response.json()
-      } catch (error) {
-        console.error("Erro ao filtrar por data:", error)
-        setError(error instanceof Error ? error.message : "Erro desconhecido")
-        return
-      }
-    }
-
-    // Filtro por data de finalização (aplicado localmente)
-    if (finalizedDateFilter) {
-      filtered = filtered.filter(order => order.finalized_at && order.finalized_at.startsWith(finalizedDateFilter))
-    }
-  
-    // Aplicar filtros de status após buscar dados do servidor
-    if (filterPending === "pending") {
-      filtered = filtered.filter((order) => order.is_pending)
-    } else if (filterPending === "completed") {
-      filtered = filtered.filter((order) => !order.is_pending)
-    } else if (filterPending === "in_production") {
-      filtered = filtered.filter((order) => order.in_production === true && !order.finalized_at)
-    } else if (filterPending === "finalized") {
-      filtered = filtered.filter((order) => !!order.finalized_at)
-    }
-
-    // Busca por nome do cliente ou número do pedido
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase()
-      filtered = filtered.filter((order) => 
-        order.customer_name.toLowerCase().includes(query) ||
-        order.order.toLowerCase().includes(query)
-      )
-    }
-  
-    console.log("Pedidos filtrados finais:", filtered.length)
-    setFilteredOrders(filtered)
   }
   
 
@@ -221,8 +188,7 @@ export default function AdminPage() {
       const result = await response.json()
       console.log("Banco inicializado:", result)
 
-      // Recarregar dados após inicialização
-      await loadOrders()
+      await loadFilteredOrders(1)
     } catch (error) {
       console.error("Erro ao inicializar banco:", error)
       setError(error instanceof Error ? error.message : "Erro desconhecido")
@@ -329,20 +295,28 @@ export default function AdminPage() {
     copyToClipboard(text)
   }
 
+  const isOrderArtMounted = (order: Order) =>
+    !order.is_pending && !order.in_production && !order.finalized_at && !order.canceled_at
+  const isOrderForList = (order: Order) =>
+    (order.in_production && !order.finalized_at && !order.canceled_at) || (!!order.finalized_at && !order.canceled_at)
+
   const handleOrderSelection = (orderId: string, checked: boolean) => {
     if (checked) {
-      setSelectedOrders(prev => [...prev, orderId])
+      setSelectedOrders((prev) => [...prev, orderId])
     } else {
-      setSelectedOrders(prev => prev.filter(id => id !== orderId))
+      setSelectedOrders((prev) => prev.filter((id) => id !== orderId))
     }
   }
 
-  const handleSelectAll = (checked: boolean) => {
+  const handleSelectAllPage = (checked: boolean) => {
     if (checked) {
-      const availableOrders = filteredOrders.filter(order => !order.in_production)
-      setSelectedOrders(availableOrders.map(order => order.id))
+      const pageIds = filteredOrders.map((o) => o.id)
+      setSelectedOrders((prev) => [...new Set([...prev, ...filteredOrders.filter(isOrderArtMounted).map((o) => o.id)])])
+      setSelectedOrdersForList((prev) => [...new Set([...prev, ...filteredOrders.filter(isOrderForList).map((o) => o.id)])])
     } else {
-      setSelectedOrders([])
+      const pageIds = filteredOrders.map((o) => o.id)
+      setSelectedOrders((prev) => prev.filter((id) => !pageIds.includes(id)))
+      setSelectedOrdersForList((prev) => prev.filter((id) => !pageIds.includes(id)))
     }
   }
 
@@ -358,9 +332,7 @@ export default function AdminPage() {
     try {
       const response = await fetch("/api/orders", {
         method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ orderIds: selectedOrders }),
       })
 
@@ -369,23 +341,13 @@ export default function AdminPage() {
         throw new Error(errorData.message || "Erro ao marcar pedidos como em produção")
       }
 
-      const updatedOrders = await response.json()
-      
-      // Atualizar a lista de pedidos
-      setOrders(prev => 
-        prev.map(order => {
-          const updated = updatedOrders.find((u: Order) => u.id === order.id)
-          return updated || order
-        })
-      )
-
-      // Limpar seleção
+      await response.json()
       setSelectedOrders([])
       setProductionDialogOpen(false)
-
+      await loadFilteredOrders(page)
       toast.success({
         title: "Pedidos marcados como em produção",
-        description: `${updatedOrders.length} pedido(s) foram marcados como em produção`,
+        description: "Os pedidos foram marcados como em produção e o lote foi registrado no histórico.",
       })
     } catch (error) {
       console.error("Erro ao marcar pedidos como em produção:", error)
@@ -396,19 +358,42 @@ export default function AdminPage() {
     }
   }
 
-  const handleOrderSelectionForList = (orderId: string, checked: boolean) => {
-    if (checked) {
-      setSelectedOrdersForList(prev => [...prev, orderId])
-    } else {
-      setSelectedOrdersForList(prev => prev.filter(id => id !== orderId))
+  const handleCancelOrder = async () => {
+    if (!selectedOrderToCancel) return
+
+    try {
+      const response = await fetch("/api/orders", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancel: true, id: selectedOrderToCancel.id }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.message || "Erro ao cancelar pedido")
+      }
+
+      setCancelDialogOpen(false)
+      setSelectedOrderToCancel(null)
+      await loadFilteredOrders(page)
+      toast.success({
+        title: "Pedido cancelado",
+        description: "O pedido foi marcado como cancelado",
+      })
+    } catch (error) {
+      console.error("Erro ao cancelar pedido:", error)
+      toast.error({
+        title: "Erro",
+        description: error instanceof Error ? error.message : "Erro desconhecido",
+      })
     }
   }
 
-  const handleSelectAllForList = (checked: boolean) => {
+  const handleOrderSelectionForList = (orderId: string, checked: boolean) => {
     if (checked) {
-      setSelectedOrdersForList(filteredOrders.map(order => order.id))
+      setSelectedOrdersForList((prev) => [...prev, orderId])
     } else {
-      setSelectedOrdersForList([])
+      setSelectedOrdersForList((prev) => prev.filter((id) => id !== orderId))
     }
   }
 
@@ -421,52 +406,35 @@ export default function AdminPage() {
       return
     }
     try {
-      // Salvar os dados dos pedidos selecionados ANTES de atualizar o status
-      const selectedOrdersData = filteredOrders.filter(order => 
-        selectedOrdersForList.includes(order.id)
-      )
-      setSelectedOrdersDataForList(selectedOrdersData)
-      // Verificar se todos os pedidos já estão finalizados (quando filtro é 'finalized')
-      if (filterPending === "finalized") {
-        const allFinalized = selectedOrdersForList.every(id => {
-          const order = orders.find(o => o.id === id)
-          return order && !!order.finalized_at
+      const idsParam = selectedOrdersForList.join(",")
+      let ordersData: Order[] = await (await fetch(`/api/orders?ids=${encodeURIComponent(idsParam)}`)).json()
+      const allFinalized = ordersData.every((o) => !!o.finalized_at)
+      if (!allFinalized) {
+        const response = await fetch("/api/orders", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ finalize: true, orderIds: selectedOrdersForList }),
         })
-        if (allFinalized) {
-          setListDialogOpen(true)
-          return
+        if (!response.ok) {
+          const err = await response.json()
+          throw new Error(err.message || "Erro ao finalizar pedidos")
         }
+        await response.json()
+        ordersData = await (await fetch(`/api/orders?ids=${encodeURIComponent(idsParam)}`)).json()
       }
-      // Finalizar pedidos selecionados (apenas se não estiverem finalizados)
-      const response = await fetch("/api/orders", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ finalize: true, orderIds: selectedOrdersForList }),
-      })
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.message || "Erro ao finalizar pedidos")
-      }
-      const updated = await response.json()
-      setOrders((prev) =>
-        prev.map((order) => {
-          const found = updated.find((u: Order) => u.id === order.id)
-          return found ? { ...order, ...found } : order
-        })
-      )
+      setSelectedOrdersDataForList(ordersData)
       setListDialogOpen(true)
+      await loadFilteredOrders(page)
     } catch (error) {
       toast.error({
-        title: "Erro ao finalizar pedidos",
+        title: "Erro ao gerar lista",
         description: error instanceof Error ? error.message : "Erro desconhecido",
       })
     }
   }
 
   const handlePrintList = () => {
-    const selectedOrdersData = filteredOrders.filter(order => 
-      selectedOrdersForList.includes(order.id)
-    )
+    const selectedOrdersData = selectedOrdersDataForList
     
     const printContent = `
       <html>
@@ -516,11 +484,7 @@ export default function AdminPage() {
   }
 
   const handleCopyOrderNumbers = () => {
-    const selectedOrdersData = filteredOrders.filter(order => 
-      selectedOrdersForList.includes(order.id)
-    )
-    
-    const orderNumbers = selectedOrdersData.map(order => order.order).join('\n')
+    const orderNumbers = selectedOrdersDataForList.map((order) => order.order).join("\n")
     copyToClipboard(orderNumbers)
   }
 
@@ -569,30 +533,13 @@ export default function AdminPage() {
     copyToClipboard(lines.join("\n"))
   }
 
-  // Nova função: checa se todos os pedidos selecionados estão em produção
-  const canGenerateList = () => {
-    if (selectedOrdersForList.length === 0) return false
-    if (filterPending === "in_production") {
-      // Lógica atual
-      return selectedOrdersForList.every(id => {
-        const order = orders.find(o => o.id === id)
-        return order && order.in_production && !order.finalized_at
-      })
-    }
-    if (filterPending === "finalized" && finalizedDateFilter) {
-      // Nova lógica para finalizados
-      return selectedOrdersForList.every(id => {
-        const order = orders.find(o => o.id === id)
-        return order && !!order.finalized_at
-      })
-    }
-    return false
-  }
-
-  // Atualizar shouldShowSpecialCheckboxes para depender do filtro de status e data de finalização
-  const shouldShowSpecialCheckboxes = () => {
-    return filterPending === "in_production" || (filterPending === "finalized" && finalizedDateFilter)
-  }
+  const allPageSelected =
+    filteredOrders.length > 0 &&
+    filteredOrders.every((o) => {
+      if (isOrderArtMounted(o)) return selectedOrders.includes(o.id)
+      if (isOrderForList(o)) return selectedOrdersForList.includes(o.id)
+      return true
+    })
 
   // Função para gerar a referência do pedido
   const generateOrderReference = (order: Order) => {
@@ -640,35 +587,6 @@ export default function AdminPage() {
     return `${order.order}-${dateString}-50x50 ${price}`
   }
 
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <Card className="w-full max-w-md">
-          <CardHeader>
-            <CardTitle>Área Administrativa</CardTitle>
-            <CardDescription>Digite a senha para acessar o painel</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="password">Senha Admin</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-                placeholder="Digite a senha"
-              />
-            </div>
-            <Button onClick={handleLogin} className="w-full bg-primary text-primary-foreground">
-              Entrar
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
-    )
-  }
-
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -689,7 +607,7 @@ export default function AdminPage() {
             <h2 className="text-xl font-bold mb-2">Erro ao Carregar Pedidos</h2>
             <p className="text-gray-600 mb-4">{error}</p>
             <div className="space-y-2">
-              <Button onClick={loadOrders} className="w-full">
+              <Button onClick={() => loadFilteredOrders(page)} className="w-full">
                 Tentar Novamente
               </Button>
               <Button onClick={initializeDatabase} variant="secondary" className="w-full">
@@ -707,201 +625,199 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
-      <div className="max-w-6xl mx-auto w-full">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Painel Administrativo</h1>
-            <p className="text-gray-600">Gerencie os pedidos do catálogo</p>
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => router.push("/admin/files")}>
-              <FolderOpen className="w-4 h-4 mr-2" />
-              Gerenciar Arquivos
-            </Button>
-            <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="ml-2">
-                {filterPending === "pending" ? "Somente Pendentes" : 
-                 filterPending === "completed" ? "Somente Com Arte Montada" : 
-                 filterPending === "in_production" ? "Somente Em Produção" :
-                 filterPending === "finalized" ? "Somente Finalizados" :
-                 "Todos os Pedidos"}
-                <ChevronDown className="ml-2 h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent>
-              <DropdownMenuItem onClick={() => setFilterPending("all")}>
-                Todos os Pedidos
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setFilterPending("pending")}>
-                Somente Pendentes
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setFilterPending("completed")}>
-                Somente Com Arte Montada
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setFilterPending("in_production")}>
-                Somente Em Produção
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setFilterPending("finalized")}>
-                Somente Finalizados
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          </div>
+    <>
+    <div className="max-w-6xl mx-auto w-full">
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold text-gray-900">Painel Administrativo</h1>
+          <p className="text-gray-600">Gerencie os pedidos do catálogo</p>
         </div>
 
-        {/* Filtros */}
-        
-        
+        {/* Filtros: Status (checkboxes) */}
+        <Card className="mb-4">
+          <CardContent className="p-4">
+            <p className="text-xs text-gray-500 mb-2">Status (marque um ou mais)</p>
+            <div className="flex flex-wrap gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <Checkbox
+                  checked={STATUS_OPTIONS.every((o) => statusFilters[o.key])}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      setStatusFilters({
+                        pending: true,
+                        art_mounted: true,
+                        in_production: true,
+                        finalized: true,
+                        canceled: true,
+                      })
+                    } else {
+                      setStatusFilters({
+                        pending: true,
+                        art_mounted: false,
+                        in_production: false,
+                        finalized: false,
+                        canceled: false,
+                      })
+                    }
+                    setPage(1)
+                  }}
+                />
+                <span className="text-sm font-medium">Todos</span>
+              </label>
+              {STATUS_OPTIONS.map(({ key, label }) => (
+                <label key={key} className="flex items-center gap-2 cursor-pointer">
+                  <Checkbox
+                    checked={statusFilters[key]}
+                    onCheckedChange={(checked) => {
+                      const next = { ...statusFilters, [key]: !!checked }
+                      if (!checked && getActiveStatusFilters(next).length === 0) return
+                      setStatusFilters(next)
+                      setPage(1)
+                    }}
+                  />
+                  <span className="text-sm">{label}</span>
+                </label>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Período (opcional) e Busca */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
-          {/* Total de Pedidos */}
-          <Card className="col-span-1">
+          <Card className="md:col-span-2">
+            <CardContent className="p-4">
+              <p className="text-xs text-gray-500 mb-2">
+                Período — escolha por qual data filtrar; preencha o intervalo e clique em Filtrar.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  value={periodFieldDraft}
+                  onValueChange={(v) => setPeriodFieldDraft(v as OrderPeriodField)}
+                >
+                  <SelectTrigger className="w-[160px] h-9">
+                    <SelectValue placeholder="Campo" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PERIOD_FIELD_OPTIONS.map((o) => (
+                      <SelectItem key={o.value} value={o.value}>
+                        {o.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Input
+                  type="date"
+                  value={periodFromDraft}
+                  onChange={(e) => setPeriodFromDraft(e.target.value)}
+                  className="w-[140px]"
+                />
+                <span className="text-gray-500">até</span>
+                <Input
+                  type="date"
+                  value={periodToDraft}
+                  onChange={(e) => setPeriodToDraft(e.target.value)}
+                  className="w-[140px]"
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-2 mt-3">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!periodFromDraft || !periodToDraft}
+                  onClick={() => {
+                    if (!periodFromDraft || !periodToDraft) {
+                      toast.warning({
+                        title: "Período incompleto",
+                        description: "Preencha a data inicial e final e clique em Filtrar.",
+                      })
+                      return
+                    }
+                    setPeriodFromApplied(periodFromDraft)
+                    setPeriodToApplied(periodToDraft)
+                    setPeriodFieldApplied(periodFieldDraft)
+                    setPage(1)
+                    loadFilteredOrders(1, {
+                      from: periodFromDraft,
+                      to: periodToDraft,
+                      field: periodFieldDraft,
+                    })
+                  }}
+                >
+                  Filtrar
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setPeriodFromDraft("")
+                    setPeriodToDraft("")
+                    setPeriodFieldDraft("created")
+                    setPeriodFromApplied("")
+                    setPeriodToApplied("")
+                    setPeriodFieldApplied("created")
+                    setPage(1)
+                    // Override garante fetch sem período (state aplicado ainda pode estar stale)
+                    loadFilteredOrders(1, { from: "", to: "", field: "created" })
+                  }}
+                >
+                  Limpar
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="md:col-span-2">
+            <CardContent className="p-4">
+              <p className="text-xs text-gray-500 mb-2">Buscar por nome ou número do pedido</p>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 w-4 h-4" />
+                  <Input
+                    type="text"
+                    placeholder="Digite e pressione Enter..."
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { setSearchQuery(searchInput); setPage(1) } }}
+                    className="pl-9 pr-9"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="absolute right-1 top-1/2 -translate-y-1/2"
+                    onClick={() => { setSearchInput(""); setSearchQuery(""); setPage(1) }}
+                  >
+                    Limpar
+                  </Button>
+                </div>
+                <Button
+                  type="button"
+                  onClick={() => { setSearchQuery(searchInput); setPage(1) }}
+                >
+                  Buscar
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <Card>
             <CardContent className="p-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-xs text-gray-500 mb-2">Total de Pedidos</p>
-                  <p className="text-xl font-bold">{filteredOrders.length}</p>
+                  <p className="text-xs text-gray-500 mb-1">Total de Pedidos (filtro)</p>
+                  <p className="text-xl font-bold">{total}</p>
                 </div>
                 <Package className="w-8 h-8 text-indigo-600" />
               </div>
             </CardContent>
           </Card>
-          {/* Total de Clientes */}
-          <Card className="col-span-1">
+          <Card>
             <CardContent className="p-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-xs text-gray-500 mb-2">Total de Clientes</p>
-                  <p className="text-xl font-bold">
-                    {new Set(filteredOrders.map(order => order.customer_name)).size}
-                  </p>
+                  <p className="text-xs text-gray-500 mb-1">Total de Clientes (página)</p>
+                  <p className="text-xl font-bold">{new Set(filteredOrders.map((o) => o.customer_name)).size}</p>
                 </div>
                 <User className="w-8 h-8 text-indigo-600" />
-              </div>
-            </CardContent>
-          </Card> 
-          {/* Criado em */}
-          <Card className="col-span-1">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-gray-500 mb-2">Criado em</p>
-                  <Input
-                    className="text-xs"
-                    id="date"
-                    type="date"
-                    value={dateFilter}
-                    onChange={(e) => setDateFilter(e.target.value)}
-                  />
-                </div>
-                <Button
-                  variant="outline"
-                  onClick={() => setDateFilter("")}
-                  className="mt-6"
-                >
-                  Limpar
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-          {/* Arte Montada em */}
-          <Card className="col-span-1">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-gray-500 mb-2">Arte Montada em</p>
-                  <Input
-                    className="text-xs"
-                    id="completionDate"
-                    type="date"
-                    value={completionDateFilter}
-                    onChange={(e) => setCompletionDateFilter(e.target.value)}
-                  />
-                </div>
-                <Button
-                  variant="outline"
-                  onClick={() => setCompletionDateFilter("")}
-                  className="mt-6"
-                >
-                  Limpar
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          {/* Em produção desde */}
-          <Card className="col-span-1">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-gray-500 mb-2">Em produção desde</p>
-                  <Input
-                    className="text-xs"
-                    id="productionDate"
-                    type="date"
-                    value={productionDateFilter}
-                    onChange={(e) => setProductionDateFilter(e.target.value)}
-                  />
-                </div>
-                <Button
-                  variant="outline"
-                  onClick={() => setProductionDateFilter("")}
-                  className="mt-6"
-                >
-                  Limpar
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-          {/* Finalizado em */}
-          <Card className="col-span-1">
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-gray-500 mb-2">Finalizado em</p>
-                  <Input
-                    className="text-xs"
-                    id="finalizedDate"
-                    type="date"
-                    value={finalizedDateFilter}
-                    onChange={(e) => setFinalizedDateFilter(e.target.value)}
-                  />
-                </div>
-                <Button
-                  variant="outline"
-                  onClick={() => setFinalizedDateFilter("")}
-                  className="mt-6"
-                >
-                  Limpar
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-          {/* Campo de busca */}
-          <Card className="mb-6 col-span-2">
-            <CardContent className="p-4">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-                <Input
-                  type="text"
-                  placeholder="Buscar por nome do cliente ou número do pedido..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-10 pr-4 py-2"
-                />
-                {searchQuery && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setSearchQuery("")}
-                    className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                  >
-                    ✕
-                  </Button>
-                )}
               </div>
             </CardContent>
           </Card>
@@ -911,32 +827,33 @@ export default function AdminPage() {
         {/* Tabela de pedidos */}
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <CardTitle className="text-lg font-bold">Lista de Pedidos</CardTitle>
                 <CardDescription className="text-sm">
-                  {searchQuery 
-                    ? `${filteredOrders.length} pedido(s) encontrado(s) para "${searchQuery}"`
-                    : `${filteredOrders.length} pedido(s) encontrado(s)`
-                  }
+                  {total > 0
+                    ? `Exibindo ${(page - 1) * PAGE_SIZE + 1} a ${Math.min(page * PAGE_SIZE, total)} de ${total} pedido(s)`
+                    : "Nenhum pedido com os filtros selecionados"}
                 </CardDescription>
               </div>
-              {selectedOrders.length > 0 && (
-                <Button
-                  onClick={() => setProductionDialogOpen(true)}
-                  className="bg-primary hover:bg-primary/20 text-white"
-                >
-                  🏭 Colocar em Produção ({selectedOrders.length})
-                </Button>
-              )}
-              {shouldShowSpecialCheckboxes() && canGenerateList() && (
-                <Button
-                  onClick={handleGenerateList}
-                  className="bg-blue-600 hover:bg-blue-700 text-white ml-2"
-                >
-                  📋 Gerar Lista ({selectedOrdersForList.length})
-                </Button>
-              )}
+              <div className="flex gap-2">
+                {selectedOrders.length > 0 && (
+                  <Button
+                    onClick={() => setProductionDialogOpen(true)}
+                    className="bg-primary hover:bg-primary/90 text-white"
+                  >
+                    Colocar em Produção ({selectedOrders.length})
+                  </Button>
+                )}
+                {selectedOrdersForList.length > 0 && (
+                  <Button
+                    onClick={handleGenerateList}
+                    className="bg-blue-600 hover:bg-blue-700 text-white"
+                  >
+                    Gerar Lista ({selectedOrdersForList.length})
+                  </Button>
+                )}
+              </div>
             </div>
           </CardHeader>
           <CardContent>
@@ -945,17 +862,10 @@ export default function AdminPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-12">
-                      {shouldShowSpecialCheckboxes() ? (
-                        <Checkbox
-                          checked={selectedOrdersForList.length > 0 && selectedOrdersForList.length === filteredOrders.length}
-                          onCheckedChange={handleSelectAllForList}
-                        />
-                      ) : (
-                        <Checkbox
-                          checked={selectedOrders.length > 0 && selectedOrders.length === filteredOrders.filter(order => !order.in_production).length}
-                          onCheckedChange={handleSelectAll}
-                        />
-                      )}
+                      <Checkbox
+                        checked={allPageSelected}
+                        onCheckedChange={(c) => handleSelectAllPage(!!c)}
+                      />
                     </TableHead>
                     <TableHead>Cliente</TableHead>
                     <TableHead>Data</TableHead>
@@ -974,18 +884,17 @@ export default function AdminPage() {
                     filteredOrders.map((order) => (
                       <TableRow key={order.id}>
                         <TableCell>
-                          {shouldShowSpecialCheckboxes() ? (
+                          {isOrderArtMounted(order) && (
+                            <Checkbox
+                              checked={selectedOrders.includes(order.id)}
+                              onCheckedChange={(c) => handleOrderSelection(order.id, !!c)}
+                            />
+                          )}
+                          {isOrderForList(order) && (
                             <Checkbox
                               checked={selectedOrdersForList.includes(order.id)}
-                              onCheckedChange={(checked) => handleOrderSelectionForList(order.id, checked as boolean)}
+                              onCheckedChange={(c) => handleOrderSelectionForList(order.id, !!c)}
                             />
-                          ) : (
-                            !order.finalized_at && (
-                              <Checkbox
-                                checked={selectedOrders.includes(order.id)}
-                                onCheckedChange={(checked) => handleOrderSelection(order.id, checked as boolean)}
-                              />
-                            )
                           )}
                         </TableCell>
                         <TableCell>
@@ -1006,14 +915,19 @@ export default function AdminPage() {
                               <span>{order.order}</span>
                               <Copy className="w-3 h-3 mr-1" />
                             </button>
-                            {order.finalized_at && (
-                              <p className="text-xs text-blue-600 flex items-center gap-1 mt-1">
-                                {generateOrderReference(order)}
-                                <button onClick={() => copyToClipboard(generateOrderReference(order))} className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors">
-                                  <Copy className="w-3 h-3" />
-                                </button>
-                              </p>
-                            )}
+                          {order.finalized_at && (
+                            <p className="text-xs text-blue-600 flex items-center gap-1 mt-1">
+                              {generateOrderReference(order)}
+                              <button onClick={() => copyToClipboard(generateOrderReference(order))} className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors">
+                                <Copy className="w-3 h-3" />
+                              </button>
+                            </p>
+                          )}
+                          {order.canceled_at && (
+                            <p className="text-xs text-red-600 flex items-center gap-1 mt-1">
+                              ❌ Cancelado
+                            </p>
+                          )}
                           </div>
                         </TableCell>
                         <TableCell>
@@ -1049,6 +963,15 @@ export default function AdminPage() {
                               </span>
                               <br/>
                               {formatDate(order.finalized_at)}
+                            </p>
+                          )}
+                          {order.canceled_at && (
+                            <p className="text-xs text-gray-700 mt-2">
+                              <span className="font-medium text-red-600">
+                                ❌ Cancelado em:
+                              </span>
+                              <br/>
+                              {formatDate(order.canceled_at)}
                             </p>
                           )}
                         </TableCell>
@@ -1087,7 +1010,7 @@ export default function AdminPage() {
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2"> 
-                            {order.finalized_at ? null : (
+                            {order.finalized_at || order.canceled_at ? null : (
                               <>
                                 <Button 
                                   size="sm" 
@@ -1114,6 +1037,17 @@ export default function AdminPage() {
                                     </Button>
                                   </>
                                 )}
+                                <Button
+                                  size="sm"
+                                  variant="destructive"
+                                  className="ml-2"
+                                  onClick={() => {
+                                    setSelectedOrderToCancel(order)
+                                    setCancelDialogOpen(true)
+                                  }}
+                                >
+                                  Cancelar
+                                </Button>
                               </>
                             )}
                           </div>
@@ -1124,6 +1058,35 @@ export default function AdminPage() {
                 </TableBody>
               </Table>
             </div>
+            {total > PAGE_SIZE && (
+              <div className="mt-4 flex items-center justify-between w-full ">
+                <p className="text-sm text-gray-500 whitespace-nowrap px-2">Página {page} de {Math.ceil(total / PAGE_SIZE) || 1}</p>
+                <Pagination>
+                  <PaginationContent className="w-full justify-end gap-2">
+                    <PaginationItem>
+                      <PaginationPrevious
+                        href="#"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          if (page > 1) setPage((p) => p - 1)
+                        }}
+                        className={page <= 1 ? "pointer-events-none opacity-50" : ""}
+                      />
+                    </PaginationItem>
+                    <PaginationItem>
+                      <PaginationNext
+                        href="#"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          if (page < Math.ceil(total / PAGE_SIZE)) setPage((p) => p + 1)
+                        }}
+                        className={page >= Math.ceil(total / PAGE_SIZE) ? "pointer-events-none opacity-50" : ""}
+                      />
+                    </PaginationItem>
+                  </PaginationContent>
+                </Pagination>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -1153,14 +1116,8 @@ export default function AdminPage() {
       
                   if (!response.ok) throw new Error("Erro ao concluir pedido")
       
-                  const updated = await response.json()
-      
-                  setOrders((prev) =>
-                    prev.map((order) =>
-                      order.id === updated.id ? updated : order
-                    )
-                  )
-      
+                  await response.json()
+                  await loadFilteredOrders(page)
                   toast.success({
                     title: "Pedido concluído",
                     description: "O pedido foi marcado como concluído",
@@ -1177,6 +1134,27 @@ export default function AdminPage() {
               }}
             >
               Confirmar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog de confirmação de cancelamento de pedido */}
+      <Dialog open={cancelDialogOpen} onOpenChange={setCancelDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancelar Pedido?</DialogTitle>
+          </DialogHeader>
+          <p>Tem certeza que deseja cancelar este pedido? Esta ação não pode ser desfeita.</p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCancelDialogOpen(false)}>
+              Não, manter pedido
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleCancelOrder}
+            >
+              Sim, cancelar pedido
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1268,6 +1246,6 @@ export default function AdminPage() {
           </div>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   )
 }

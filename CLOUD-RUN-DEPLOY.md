@@ -31,22 +31,22 @@ gcloud projects get-iam-policy $PROJECT_ID \
 npm run build
 
 # Build da imagem Docker
-gcloud builds submit --tag gcr.io/$PROJECT_ID/catalogo-interativo
+gcloud builds submit --tag gcr.io/$PROJECT_ID/catalogo-colorsublime
 
 # Deploy no Cloud Run
-gcloud run deploy catalogo-interativo \
-  --image gcr.io/$PROJECT_ID/catalogo-interativo \
+gcloud run deploy catalogo-colorsublime \
+  --image gcr.io/$PROJECT_ID/catalogo-colorsublime \
   --platform managed \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars GCS_BUCKET_NAME=bucket-catalogo-interativo,GCS_PROJECT_ID=$PROJECT_ID
+  --set-env-vars GCS_BUCKET_NAME=bucket-catalogo-colorsublime,GCS_PROJECT_ID=$PROJECT_ID
 ```
 
 ### 3. **Verificar Deploy**
 
 ```bash
 # Ver logs do Cloud Run
-gcloud logs read --service=catalogo-interativo --limit=50
+gcloud logs read --service=catalogo-colorsublime --limit=50
 
 # Verificar se o serviço está rodando
 gcloud run services list
@@ -55,7 +55,7 @@ gcloud run services list
 ## 🔧 Configuração Atual
 
 ### **Variáveis de Ambiente no Cloud Run:**
-- `GCS_BUCKET_NAME=bucket-catalogo-interativo`
+- `GCS_BUCKET_NAME=bucket-catalogo-colorsublime`
 - `GCS_PROJECT_ID=project-abda4253-0801-457c-81a`
 
 ### **Detecção de Ambiente:**

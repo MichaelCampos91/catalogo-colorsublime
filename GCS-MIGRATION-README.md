@@ -12,7 +12,7 @@ Edite o arquivo `.env.local` na raiz do projeto e substitua os valores pelos seu
 
 ```env
 # Google Cloud Storage Configuration
-GCS_BUCKET_NAME=bucket-catalogo-interativo
+GCS_BUCKET_NAME=bucket-catalogo-colorsublime
 GCS_PROJECT_ID=seu-projeto-id-real
 GCS_CLIENT_EMAIL=sua-service-account@projeto.iam.gserviceaccount.com
 GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nSUA_CHAVE_PRIVADA_AQUI\n-----END PRIVATE KEY-----\n"
@@ -29,7 +29,7 @@ GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nSUA_CHAVE_PRIVADA_AQUI\n-----END P
 
 ### 3. Configurar Permissões do Bucket
 
-Certifique-se de que o bucket `bucket-catalogo-interativo` tenha:
+Certifique-se de que o bucket `bucket-catalogo-colorsublime` tenha:
 - Acesso público para leitura (para as imagens)
 - Permissões de leitura para a Service Account
 
@@ -46,7 +46,7 @@ node test-gcs-migration.js
 As imagens devem estar organizadas no bucket da seguinte forma:
 
 ```
-bucket-catalogo-interativo/
+bucket-catalogo-colorsublime/
 └── public/
     └── files/
         ├── AAAA/
@@ -64,7 +64,7 @@ bucket-catalogo-interativo/
 
 ### URLs das Imagens
 - **Antes**: `/files/AAAA/AAAA-1.jpg`
-- **Depois**: `https://storage.googleapis.com/bucket-catalogo-interativo/public/files/AAAA/AAAA-1.jpg`
+- **Depois**: `https://storage.googleapis.com/bucket-catalogo-colorsublime/public/files/AAAA/AAAA-1.jpg`
 
 ### Funcionalidades Mantidas
 - ✅ Carregamento de imagens por categoria
@@ -97,7 +97,7 @@ bucket-catalogo-interativo/
 ```
 ❌ Erro ao testar conexão GCS: Bucket not found
 ```
-**Solução**: Verifique se o bucket `bucket-catalogo-interativo` existe e está acessível
+**Solução**: Verifique se o bucket `bucket-catalogo-colorsublime` existe e está acessível
 
 ### Nenhuma Imagem Encontrada
 ```

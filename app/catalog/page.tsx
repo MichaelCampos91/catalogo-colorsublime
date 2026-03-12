@@ -58,6 +58,7 @@ export default function CatalogPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [timeLeft, setTimeLeft] = useState<number>(24 * 60 * 60) // 24 horas em segundos
   const [imagesCache, setImagesCache] = useState<Record<string, { code: string; image_url: string; category_id: string }>>({})
+  const [trendingImages, setTrendingImages] = useState<CatalogImage[]>([])
   const router = useRouter()
 
   // Constantes para cache
@@ -159,6 +160,26 @@ export default function CatalogPage() {
 
     loadCatalogData()
 
+    // Tendências (falha isolada: mantém [])
+    ;(async () => {
+      try {
+        const res = await fetch("/api/catalog/trends")
+        if (!res.ok) return
+        const data = await res.json()
+        if (!Array.isArray(data.images)) return
+        const mapped: CatalogImage[] = data.images.map((img: { code: string; url: string; category_id: string }) => ({
+          id: img.code,
+          code: img.code,
+          category_id: img.category_id,
+          image_url: img.url,
+          thumbnail_url: null,
+        }))
+        setTrendingImages(mapped)
+      } catch {
+        // silencioso
+      }
+    })()
+
     // Inicializar o cronômetro apenas se houver dados do cliente
     if (data) {
       const savedTime = localStorage.getItem("catalogTimer")
@@ -205,7 +226,7 @@ export default function CatalogPage() {
       const missing = selectedImages.filter((code) => !imagesCache[code])
       if (missing.length === 0) return
       try {
-        const res = await fetch(`/api/files?all=true&limit=9999&page=1`)
+        const res = await fetch(`/api/public-catalog?all=true&limit=9999&page=1`)
         if (!res.ok) return
         const j = await res.json()
         const fetched: Record<string, { code: string; image_url: string; category_id: string }> = {}
@@ -313,8 +334,8 @@ export default function CatalogPage() {
         queryParams.append('search', search)
       }
 
-      // Chamar novo endpoint dinâmico
-      const response = await fetch(`/api/files?${queryParams.toString()}`)
+      // Chamar endpoint público de catálogo (sem exigir autenticação)
+      const response = await fetch(`/api/public-catalog?${queryParams.toString()}`)
       if (!response.ok) {
         const errorData = await response.json()
         throw new Error(`Erro ao carregar catálogo: ${errorData.message || response.status}`)
@@ -488,7 +509,7 @@ export default function CatalogPage() {
       setShowConfirmDialog(false)
       setIsAware(false)
 
-      // Redirecionar para o WhatsApp com a mensagem
+      // Redirecionar para o WhatsApp com a mensagem (mantido intacto para este projeto)
       const whatsappNumber = '5518998048419'
       const whatsappMessage = encodeURIComponent(message)
       const whatsappUrl = `https://wa.me/${whatsappNumber}?text=${whatsappMessage}`
@@ -608,6 +629,56 @@ export default function CatalogPage() {
         style={{ height: 'calc(100vh - 120px)' }}
         onScroll={handleScroll}
       >
+        {/* Tendências: topo, mesmo layout das pastas; oculto durante busca */}
+        {!searchQuery.trim() && trendingImages.length > 0 && (
+          <div className="mb-8">
+            <h2 className="text-xl font-bold mb-4 text-gray-900">TENDÊNCIAS</h2>
+            <div className="relative">
+              <div className="overflow-x-auto pb-4">
+                <div className="inline-flex gap-3 min-w-full">
+                  {trendingImages.map((image) => {
+                    const isSelected = selectedImages.includes(image.code)
+                    const isDisabled = !isSelected && selectedImages.length >= (customerData?.quantity ?? 0)
+                    return (
+                      <Card
+                        key={image.id}
+                        className={`relative transition-all flex-shrink-0 w-[200px] ${
+                          isSelected ? "ring-2 ring-indigo-500" : ""
+                        } ${!customerData ? "cursor-default" : isDisabled ? "opacity-50" : "cursor-pointer hover:shadow-md"}`}
+                        onClick={() => customerData && !isDisabled && handleImageSelect(image.code)}
+                      >
+                        <CardContent className="p-0">
+                          <div className="relative aspect-square">
+                            <img
+                              src={image.image_url}
+                              alt={image.code}
+                              className="object-cover w-full h-full"
+                              onContextMenu={(e) => e.preventDefault()}
+                              draggable="false"
+                              style={{ userSelect: "none" }}
+                            />
+                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                              <img src="/logo.png" alt="Logo" className="w-24 opacity-40" />
+                            </div>
+                            {isSelected && (
+                              <div className="absolute inset-0 bg-indigo-500 bg-opacity-20 flex items-center justify-center">
+                                <Check className="w-8 h-8 text-indigo-500" />
+                              </div>
+                            )}
+                          </div>
+                          <div className="p-2 text-center">
+                            <p className="text-sm font-medium">{image.code}</p>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {filteredCategories.length === 0 ? (
           <div className="text-center py-12">
             <p className="text-gray-500">

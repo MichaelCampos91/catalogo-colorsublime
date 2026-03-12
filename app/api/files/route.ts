@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server"
+import { cookies } from "next/headers"
 import path from "path"
-import { S3Client, ListObjectsV2Command, ListObjectsV2CommandOutput, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3'
-import sharp from 'sharp'
-import { getFromCache, setCache, generateCacheKey, invalidateCache, getSignedUrlForR2 } from '@/lib/r2-cache'
+import { S3Client, ListObjectsV2Command, ListObjectsV2CommandOutput, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand, CopyObjectCommand } from "@aws-sdk/client-s3"
+import sharp from "sharp"
+import { getFromCache, setCache, generateCacheKey, invalidateCache, getSignedUrlForR2 } from "@/lib/r2-cache"
+import { requireAuth, authErrorResponse } from "@/lib/auth"
 
 // Função para inicializar o S3Client para Cloudflare R2
 function getS3Client() {
@@ -207,7 +209,70 @@ async function listAllObjects(s3Client: S3Client, bucketName: string, prefix: st
   return allObjects
 }
 
-export async function GET(request: Request) {
+export type TrendingImageEntry = {
+  code: string
+  url: string
+  category_id: string
+}
+
+/**
+ * Resolve códigos (ordem do ranking) para URLs assinadas do R2.
+ * Lista o prefixo public/files/ uma vez; mesma lógica de code que buildCatalogResponse na raiz.
+ * Códigos sem arquivo no R2 são omitidos.
+ */
+export async function resolveTrendingCatalogImages(codes: string[]): Promise<TrendingImageEntry[]> {
+  if (!codes.length) return []
+
+  const codeSet = new Set(codes)
+  const codeToKey = new Map<string, { key: string; category: string }>()
+  const basePrefix = "public/files/"
+
+  let s3Client: S3Client
+  let bucketName: string
+  try {
+    const bucket = getBucketAndPath()
+    s3Client = bucket.s3Client
+    bucketName = bucket.bucketName
+  } catch {
+    return []
+  }
+
+  const objects = await listAllObjects(s3Client, bucketName, basePrefix)
+
+  for (const obj of objects) {
+    const key = obj.Key
+    if (!key || key.endsWith(".folder")) continue
+    if (!/\.(jpg|jpeg|png|webp)$/i.test(key)) continue
+
+    const pathParts = key.split("/")
+    if (pathParts.length < 3) continue
+
+    // Mesmo critério da raiz em buildCatalogResponse: public/files/CATEGORIA/arquivo
+    const category = pathParts[2]
+    const fileName = pathParts[pathParts.length - 1]
+    const code = path.parse(fileName).name
+
+    if (!codeSet.has(code) || codeToKey.has(code)) continue
+    codeToKey.set(code, { key, category })
+  }
+
+  const ordered: Array<{ code: string; key: string; category: string }> = []
+  for (const code of codes) {
+    const entry = codeToKey.get(code)
+    if (entry) ordered.push({ code, key: entry.key, category: entry.category })
+  }
+  if (ordered.length === 0) return []
+
+  const signedUrls = await Promise.all(ordered.map(({ key }) => getSignedUrlForR2(s3Client, bucketName, key)))
+
+  return ordered.map(({ code, category }, index) => ({
+    code,
+    url: signedUrls[index],
+    category_id: category,
+  }))
+}
+
+export async function buildCatalogResponse(request: Request) {
   try {
     const { searchParams } = new URL(request.url)
     const dir = searchParams.get("dir") || ""
@@ -219,12 +284,7 @@ export async function GET(request: Request) {
 
     // Inicializar R2
     const { s3Client, bucketName } = getBucketAndPath()
-    
-    // Debug logs para verificar configuração
-    // console.log('🔍 Environment:', process.env.NODE_ENV || 'development')
-    // console.log('🔍 Bucket Name:', bucketName)
-    // console.log('🔍 Force Reload:', forceReload)
-    
+
     // Construir prefixo baseado no diretório
     const basePrefix = "public/files/"
     const searchPrefix = dir ? `${basePrefix}${dir}/` : basePrefix
@@ -232,51 +292,45 @@ export async function GET(request: Request) {
     // Verificar cache antes de buscar do R2 (mas ignorar se forceReload for true)
     const cacheKey = generateCacheKey(searchPrefix, dir, search, page, limit, all)
     const cachedData = !forceReload ? getFromCache(cacheKey) : null
-    
+
     if (cachedData) {
-      // console.log('✅ Retornando dados do cache:', cacheKey)
       return NextResponse.json(cachedData, {
         headers: {
-          'Cache-Control': 'public, max-age=900',
-          'X-Cache': 'HIT'
-        }
+          "Cache-Control": "public, max-age=900",
+          "X-Cache": "HIT",
+        },
       })
     }
 
     // Listar arquivos do bucket
     const objects = await listAllObjects(s3Client, bucketName, searchPrefix)
-    
+
     // Agrupar arquivos por categoria (pasta)
     const categoriesMap = new Map<string, any[]>()
     const foldersSet = new Set<string>() // Para detectar pastas vazias (com apenas .folder)
     const filesToProcess: Array<{ key: string; category: string; fileName: string }> = []
-    
+
     // Primeiro passo: processar arquivos e coletar os que precisam de signed URLs
     for (const obj of objects) {
       const key = obj.Key
-      
+
       // Ignorar arquivos .folder (marcadores de pasta vazia)
-      if (key.endsWith('.folder')) {
-        // Extrair o nome da pasta do arquivo .folder
-        // Exemplo: public/files/CATEGORIA/.folder -> CATEGORIA
-        // Exemplo: public/files/DIR/SUBPASTA/.folder -> SUBPASTA (quando dir=DIR)
-        const pathParts = key.replace(basePrefix, '').split('/').filter(p => p && p !== '.folder')
+      if (key.endsWith(".folder")) {
+        const pathParts = key.replace(basePrefix, "").split("/").filter((p) => p && p !== ".folder")
         if (pathParts.length > 0) {
           const folderName = pathParts[pathParts.length - 1]
-          
+
           // Se estamos na raiz (dir vazio), pegar a primeira pasta
           // Se estamos em um diretório, pegar a pasta do nível imediatamente abaixo
           if (!dir) {
-            // Na raiz: public/files/CATEGORIA/.folder -> categoria é CATEGORIA
             if (pathParts.length === 1) {
               foldersSet.add(folderName)
             }
           } else {
-            // Dentro de um dir: public/files/DIR/SUBPASTA/.folder -> categoria é SUBPASTA
-            const dirParts = dir.split('/').filter(p => p)
+            const dirParts = dir.split("/").filter((p) => p)
             if (pathParts.length === dirParts.length + 1) {
-              const expectedDir = pathParts.slice(0, -1).join('/')
-              if (expectedDir === dir.replace(/\/+$/, '')) {
+              const expectedDir = pathParts.slice(0, -1).join("/")
+              if (expectedDir === dir.replace(/\/+$/, "")) {
                 foldersSet.add(folderName)
               }
             }
@@ -284,77 +338,76 @@ export async function GET(request: Request) {
         }
         continue
       }
-      
+
       // Pular se não for uma imagem
       if (!/\.(jpg|jpeg|png|webp)$/i.test(key)) continue
-      
+
       // Extrair categoria do caminho: public/files/CATEGORIA/imagem.jpg
-      const pathParts = key.split('/')
+      const pathParts = key.split("/")
       if (pathParts.length < 3) continue // Deve ter pelo menos public/files/categoria/imagem
-      
+
       // Determinar qual é a categoria baseado no contexto
       let category: string
       let fileName: string
-      
+
       if (!dir) {
         // Na raiz: public/files/CATEGORIA/imagem.jpg -> categoria é CATEGORIA
         category = pathParts[2]
         fileName = pathParts[pathParts.length - 1]
       } else {
         // Dentro de um diretório: precisamos verificar se está no nível correto
-        const dirParts = dir.split('/').filter(p => p)
-        const filePathParts = key.replace(basePrefix, '').split('/').filter(p => p)
-        
+        const dirParts = dir.split("/").filter((p) => p)
+        const filePathParts = key.replace(basePrefix, "").split("/").filter((p) => p)
+
         // Se o arquivo está diretamente no diretório especificado (não em subpasta)
         if (filePathParts.length === dirParts.length + 1) {
-          const fileDir = filePathParts.slice(0, -1).join('/')
-          if (fileDir === dir.replace(/\/+$/, '')) {
+          const fileDir = filePathParts.slice(0, -1).join("/")
+          if (fileDir === dir.replace(/\/+$/, "")) {
             // É uma imagem no diretório atual, não uma categoria
             // Isso será tratado no currentDirImages abaixo
             continue
           }
         }
-        
+
         // Se o arquivo está em uma subpasta do diretório
         if (filePathParts.length === dirParts.length + 2) {
-          const fileDir = filePathParts.slice(0, -1).join('/')
-          const expectedDir = dirParts.join('/')
-          if (filePathParts.slice(0, -2).join('/') === expectedDir) {
+          const fileDir = filePathParts.slice(0, -1).join("/")
+          const expectedDir = dirParts.join("/")
+          if (filePathParts.slice(0, -2).join("/") === expectedDir) {
             category = filePathParts[filePathParts.length - 2]
             fileName = filePathParts[filePathParts.length - 1]
           } else {
             continue
           }
         } else {
-          // Arquivo não está no contexto esperado
           continue
         }
       }
-      
+
       if (!categoriesMap.has(category)) {
         categoriesMap.set(category, [])
       }
-      
+
       // Coletar arquivo para processar signed URLs depois
       filesToProcess.push({ key, category, fileName })
     }
-    
+
     // Segundo passo: gerar todas as signed URLs em paralelo
     const signedUrlPromises = filesToProcess.map(({ key }) => getSignedUrlForR2(s3Client, bucketName, key))
     const signedUrls = await Promise.all(signedUrlPromises)
-    
+
     // Terceiro passo: adicionar arquivos com signed URLs ao mapa de categorias
     filesToProcess.forEach(({ category, fileName }, index) => {
       categoriesMap.get(category)!.push({
         name: fileName,
         code: path.parse(fileName).name,
         url: signedUrls[index],
-        category: category
+        category: category,
       })
     })
 
     // Adicionar pastas vazias (que só têm .folder) às categorias
-    foldersSet.forEach(folderName => {
+    foldersSet.forEach((folderName) => {
       if (!categoriesMap.has(folderName)) {
         categoriesMap.set(folderName, [])
       }
@@ -364,8 +417,8 @@ export async function GET(request: Request) {
     let categories = Array.from(categoriesMap.entries()).map(([categoryName, images]) => ({
       id: categoryName,
       name: categoryName,
-      slug: categoryName.toLowerCase().replace(/\s+/g, '-'),
-      images: images
+      slug: categoryName.toLowerCase().replace(/\s+/g, "-"),
+      images: images,
     }))
 
     // Aplicar filtro de busca se especificado
@@ -382,63 +435,43 @@ export async function GET(request: Request) {
     // Listar imagens do diretório atual (não das subpastas) - para compatibilidade
     let currentDirImages: any[] = []
     if (dir) {
-      // Construir o prefixo correto para o diretório atual
-      // Exemplo: se dir = "AAAA", prefixo = "public/files/AAAA/"
-      // Exemplo: se dir = "AAAA/BBBB", prefixo = "public/files/AAAA/BBBB/"
       const cleanDir = dir.startsWith("files/") ? dir.slice(6) : dir
       const dirPrefix = `${basePrefix}${cleanDir}/`
-      
-      // console.log('🔍 Listando imagens do diretório atual:', { dir, cleanDir, dirPrefix })
-      
-      // Filtrar arquivos que:
-      // 1. Começam com o prefixo do diretório
-      // 2. São imagens (jpg, jpeg, png, webp)
-      // 3. Estão diretamente no diretório (não em subpastas)
-      //    Ou seja: o caminho após o prefixo não contém mais "/"
-      const directFiles = objects.filter(obj => {
+
+      const directFiles = objects.filter((obj) => {
         const key = obj.Key
-        
-        // Deve começar com o prefixo do diretório
+
         if (!key.startsWith(dirPrefix)) {
           return false
         }
-        
-        // Deve ser uma imagem
+
         if (!/\.(jpg|jpeg|png|webp)$/i.test(key)) {
           return false
         }
-        
-        // Ignorar arquivos .folder
-        if (key.endsWith('.folder')) {
+
+        if (key.endsWith(".folder")) {
           return false
         }
-        
-        // Verificar se está diretamente no diretório (não em subpasta)
-        // Remover o prefixo e verificar se não há mais "/"
-        const relativePath = key.replace(dirPrefix, '')
-        const isDirectFile = !relativePath.includes('/')
-        
+
+        const relativePath = key.replace(dirPrefix, "")
+        const isDirectFile = !relativePath.includes("/")
+
         return isDirectFile
       })
-      
-      // console.log(`✅ Encontradas ${directFiles.length} imagens diretas no diretório ${dir}`)
-      
-      // Gerar signed URLs para imagens do diretório atual
+
       const imagesWithSignedUrls = await Promise.all(
         directFiles.map(async (obj) => {
-          const fileName = obj.Key.split('/').pop()!
+          const fileName = obj.Key.split("/").pop()!
           const signedUrl = await getSignedUrlForR2(s3Client, bucketName, obj.Key)
-          // console.log(`📷 Gerando signed URL para: ${fileName} -> ${signedUrl.substring(0, 50)}...`)
           return {
             name: fileName,
             code: path.parse(fileName).name,
             url: signedUrl,
-            category: dir
+            category: dir,
           }
-        })
+        }),
       )
       currentDirImages = imagesWithSignedUrls
-      // console.log(`✅ Total de imagens processadas: ${currentDirImages.length}`)
     }
 
     const responseData = {
@@ -448,76 +481,79 @@ export async function GET(request: Request) {
         total: totalCategories,
         page,
         limit,
-        totalPages
-      }
+        totalPages,
+      },
     }
 
-    // Armazenar no cache apenas se não for forceReload
     if (!forceReload) {
       setCache(cacheKey, responseData)
-    } else {
-      // console.log('🔄 [Backend] Force reload detectado, não armazenando no cache do servidor')
     }
 
-    // Ajustar headers de cache baseado em forceReload
     const cacheHeaders: Record<string, string> = forceReload
       ? {
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-          'X-Cache': 'MISS-FORCED'
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          Pragma: "no-cache",
+          Expires: "0",
+          "X-Cache": "MISS-FORCED",
         }
       : {
-          'Cache-Control': 'public, max-age=60', // Cache mais curto para dados novos
-          'X-Cache': 'MISS'
+          "Cache-Control": "public, max-age=60",
+          "X-Cache": "MISS",
         }
 
     return NextResponse.json(responseData, {
-      headers: cacheHeaders
+      headers: cacheHeaders,
     })
   } catch (error) {
-    // console.error("❌ [Backend] Erro ao listar arquivos:", {
-    //   error,
-    //   message: error instanceof Error ? error.message : "Erro desconhecido",
-    //   stack: error instanceof Error ? error.stack : undefined,
-    //   dir,
-    //   name: error instanceof Error ? error.name : typeof error
-    // })
-    
-    // Mensagens de erro mais descritivas
     let errorMessage = "Erro ao listar arquivos"
     let statusCode = 500
-    
+
     if (error instanceof Error) {
-      // Erros relacionados a credenciais R2
       if (error.message.includes("Credenciais") || error.message.includes("R2") || error.message.includes("não configurado")) {
         errorMessage = "Erro de configuração do CloudFlare R2. Verifique as credenciais."
         statusCode = 500
-      }
-      // Erros de rede/conexão
-      else if (error.message.includes("ECONNREFUSED") || error.message.includes("timeout") || error.message.includes("ENOTFOUND")) {
+      } else if (error.message.includes("ECONNREFUSED") || error.message.includes("timeout") || error.message.includes("ENOTFOUND")) {
         errorMessage = "Erro de conexão com o CloudFlare R2. Tente novamente."
         statusCode = 503
-      }
-      // Outros erros
-      else {
+      } else {
         errorMessage = error.message || "Erro desconhecido ao listar arquivos"
       }
     }
-    
+
     return NextResponse.json(
-      { 
+      {
         error: errorMessage,
         message: errorMessage,
-        details: process.env.NODE_ENV === 'development' ? (error instanceof Error ? error.stack : String(error)) : undefined
+        details: process.env.NODE_ENV === "development" ? (error instanceof Error ? error.stack : String(error)) : undefined,
       },
-      { status: statusCode }
+      { status: statusCode },
     )
   }
 }
 
+export async function GET(request: Request) {
+  try {
+    const cookieStore = await cookies()
+    const cookieToken = cookieStore.get("auth_token")?.value
+    await requireAuth(request, cookieToken)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Token não fornecido"
+    return authErrorResponse(msg, 401)
+  }
+
+  return buildCatalogResponse(request)
+}
+
 
 export async function POST(request: Request) {
+  try {
+    const cookieStore = await cookies()
+    const cookieToken = cookieStore.get("auth_token")?.value
+    await requireAuth(request, cookieToken)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Token não fornecido"
+    return authErrorResponse(msg, 401)
+  }
   try {
     const formData = await request.formData()
     const action = formData.get("action")
@@ -606,6 +642,87 @@ export async function POST(request: Request) {
           // console.error("API: Erro ao criar pasta no R2", { error: createError, placeholderPath })
           throw new Error(`Erro ao criar pasta: ${createError instanceof Error ? createError.message : "Erro desconhecido"}`)
         }
+      }
+
+      case "renameFolder": {
+        const oldName = (formData.get("oldName") as string) || ""
+        const newName = (formData.get("newName") as string) || ""
+
+        const sanitizedOld = sanitizeName(oldName)
+        const sanitizedNew = sanitizeName(newName)
+        if (!sanitizedOld || !sanitizedNew) {
+          return NextResponse.json({ error: "Nome da pasta inválido" }, { status: 400 })
+        }
+        if (sanitizedOld === sanitizedNew) {
+          return NextResponse.json({ error: "Nome igual ao atual" }, { status: 400 })
+        }
+
+        const oldPrefix = `${getR2Path(dir, sanitizedOld)}/`
+        const newPrefix = `${getR2Path(dir, sanitizedNew)}/`
+
+        try {
+          const headNew = new HeadObjectCommand({
+            Bucket: bucketName,
+            Key: newPrefix.slice(0, -1),
+          })
+          await s3Client.send(headNew)
+          return NextResponse.json({ error: "Já existe pasta ou arquivo com esse nome" }, { status: 400 })
+        } catch (e: unknown) {
+          const err = e as { name?: string; $metadata?: { httpStatusCode?: number } }
+          if (err.name !== "NotFound" && err.$metadata?.httpStatusCode !== 404) throw e
+        }
+
+        const listNew = new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: newPrefix,
+          MaxKeys: 1,
+        })
+        const listNewRes = await s3Client.send(listNew)
+        if (listNewRes.Contents && listNewRes.Contents.length > 0) {
+          return NextResponse.json({ error: "Já existe pasta ou arquivo com esse nome" }, { status: 400 })
+        }
+
+        const allOldKeys: string[] = []
+        let continuationToken: string | undefined
+        do {
+          const listOld = new ListObjectsV2Command({
+            Bucket: bucketName,
+            Prefix: oldPrefix,
+            ContinuationToken: continuationToken,
+          })
+          const listOldRes = await s3Client.send(listOld)
+          const contents = listOldRes.Contents || []
+          for (const obj of contents) {
+            if (obj.Key) allOldKeys.push(obj.Key)
+          }
+          continuationToken = listOldRes.IsTruncated ? listOldRes.NextContinuationToken : undefined
+        } while (continuationToken)
+
+        if (allOldKeys.length === 0) {
+          return NextResponse.json({ error: "Pasta não encontrada" }, { status: 404 })
+        }
+
+        for (const oldKey of allOldKeys) {
+          const newKey = oldKey.replace(oldPrefix, newPrefix)
+          await s3Client.send(
+            new CopyObjectCommand({
+              Bucket: bucketName,
+              CopySource: `${bucketName}/${oldKey}`,
+              Key: newKey,
+            })
+          )
+        }
+        for (const oldKey of allOldKeys) {
+          await s3Client.send(
+            new DeleteObjectCommand({
+              Bucket: bucketName,
+              Key: oldKey,
+            })
+          )
+        }
+
+        invalidateCacheForDir(dir)
+        return NextResponse.json({ message: "Pasta renomeada com sucesso" })
       }
 
       case "upload": {
@@ -831,6 +948,14 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  try {
+    const cookieStore = await cookies()
+    const cookieToken = cookieStore.get("auth_token")?.value
+    await requireAuth(request, cookieToken)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Token não fornecido"
+    return authErrorResponse(msg, 401)
+  }
   try {
     const { searchParams } = new URL(request.url)
     const dir = searchParams.get("dir") || ""
