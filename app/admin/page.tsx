@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/pagination"
 
 import type { OrderStatusFilter, OrderPeriodField } from "@/lib/database"
+import { PostOrderSettings } from "@/components/admin/post-order-settings"
 import {
   Select,
   SelectContent,
@@ -641,6 +642,9 @@ export default function AdminPage() {
           <h1 className="text-2xl font-bold text-gray-900">Painel Administrativo</h1>
           <p className="text-gray-600">Gerencie os pedidos do catálogo</p>
         </div>
+
+        {/* Configuração: destino pós-pedido */}
+        <PostOrderSettings />
 
         {/* Filtros: Status (checkboxes) */}
         <Card className="mb-4">

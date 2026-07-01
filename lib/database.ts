@@ -876,3 +876,126 @@ export async function getProductionBatchOrders(batchId: string): Promise<Order[]
   }
 }
 
+// ============================================================
+// Configurações da aplicação (destino pós-pedido)
+// ============================================================
+
+export type PostOrderDestinationType = "confirmation" | "whatsapp" | "url"
+
+export type PostOrderSettings = {
+  destination_type: PostOrderDestinationType
+  whatsapp_phone: string
+  whatsapp_message: string
+  redirect_url: string
+}
+
+export const DEFAULT_WHATSAPP_MESSAGE =
+  "Olá! Meu nome é *{nome}* e esses são os temas que escolhi do catálogo:\n\n{itens} \n Nº do pedido: *{pedido}*"
+
+export const DEFAULT_POST_ORDER_SETTINGS: PostOrderSettings = {
+  destination_type: "confirmation",
+  whatsapp_phone: "5518998048419",
+  whatsapp_message: DEFAULT_WHATSAPP_MESSAGE,
+  redirect_url: "",
+}
+
+const SETTINGS_KEYS = {
+  destinationType: "post_order_destination_type",
+  whatsappPhone: "post_order_whatsapp_phone",
+  whatsappMessage: "post_order_whatsapp_message",
+  redirectUrl: "post_order_redirect_url",
+} as const
+
+// Cria a tabela de settings (se necessário) e semeia os valores padrão.
+// Idempotente: seguro para rodar em qualquer requisição.
+async function ensureSettingsTable(client: import("pg").PoolClient): Promise<void> {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+  `)
+  await client.query(
+    `INSERT INTO settings (key, value) VALUES
+      ($1, $2), ($3, $4), ($5, $6), ($7, $8)
+     ON CONFLICT (key) DO NOTHING`,
+    [
+      SETTINGS_KEYS.destinationType, DEFAULT_POST_ORDER_SETTINGS.destination_type,
+      SETTINGS_KEYS.whatsappPhone, DEFAULT_POST_ORDER_SETTINGS.whatsapp_phone,
+      SETTINGS_KEYS.whatsappMessage, DEFAULT_POST_ORDER_SETTINGS.whatsapp_message,
+      SETTINGS_KEYS.redirectUrl, DEFAULT_POST_ORDER_SETTINGS.redirect_url,
+    ],
+  )
+}
+
+// Exportado para reuso no init-db.
+export async function ensureSettingsTableAndSeed(): Promise<void> {
+  let client
+  try {
+    client = await pool.connect()
+    await ensureSettingsTable(client)
+  } finally {
+    if (client) client.release()
+  }
+}
+
+function normalizeDestinationType(value: unknown): PostOrderDestinationType {
+  if (value === "whatsapp" || value === "url" || value === "confirmation") {
+    return value
+  }
+  return DEFAULT_POST_ORDER_SETTINGS.destination_type
+}
+
+export async function getPostOrderSettings(): Promise<PostOrderSettings> {
+  let client
+  try {
+    client = await pool.connect()
+    await ensureSettingsTable(client)
+    const result = await client.query(
+      `SELECT key, value FROM settings WHERE key = ANY($1::text[])`,
+      [Object.values(SETTINGS_KEYS)],
+    )
+    const map = new Map<string, string>(result.rows.map((r: { key: string; value: string | null }) => [r.key, r.value ?? ""]))
+    return {
+      destination_type: normalizeDestinationType(map.get(SETTINGS_KEYS.destinationType)),
+      whatsapp_phone: map.get(SETTINGS_KEYS.whatsappPhone) ?? DEFAULT_POST_ORDER_SETTINGS.whatsapp_phone,
+      whatsapp_message: map.get(SETTINGS_KEYS.whatsappMessage) ?? DEFAULT_POST_ORDER_SETTINGS.whatsapp_message,
+      redirect_url: map.get(SETTINGS_KEYS.redirectUrl) ?? DEFAULT_POST_ORDER_SETTINGS.redirect_url,
+    }
+  } catch (error) {
+    // Nunca quebrar o fluxo público: retorna defaults.
+    console.error("Erro ao buscar configurações de destino pós-pedido:", error)
+    return { ...DEFAULT_POST_ORDER_SETTINGS }
+  } finally {
+    if (client) client.release()
+  }
+}
+
+export async function updatePostOrderSettings(settings: PostOrderSettings): Promise<PostOrderSettings> {
+  let client
+  try {
+    client = await pool.connect()
+    await ensureSettingsTable(client)
+    const entries: [string, string][] = [
+      [SETTINGS_KEYS.destinationType, settings.destination_type],
+      [SETTINGS_KEYS.whatsappPhone, settings.whatsapp_phone],
+      [SETTINGS_KEYS.whatsappMessage, settings.whatsapp_message],
+      [SETTINGS_KEYS.redirectUrl, settings.redirect_url],
+    ]
+    for (const [key, value] of entries) {
+      await client.query(
+        `INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [key, value],
+      )
+    }
+    return settings
+  } catch (error) {
+    console.error("Erro ao atualizar configurações de destino pós-pedido:", error)
+    throw error
+  } finally {
+    if (client) client.release()
+  }
+}
+

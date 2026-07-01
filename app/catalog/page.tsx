@@ -505,7 +505,12 @@ export default function CatalogPage() {
       setLoading(true)
       setError(null)
 
-      const message = `Olá! Meu nome é *${customerData.name}* e esses são os temas que escolhi do catálogo:\n\n${selectedImages.map((code) => `*${code}*`).join("\n")} \n Nº do pedido: *${customerData.orderNumber}*`
+      // Dados capturados antes de limpar o estado (necessários para o redirecionamento)
+      const orderNumber = customerData.orderNumber
+      const customerName = customerData.name
+      const itemsText = selectedImages.map((code) => `*${code}*`).join("\n")
+
+      const message = `Olá! Meu nome é *${customerName}* e esses são os temas que escolhi do catálogo:\n\n${itemsText} \n Nº do pedido: *${orderNumber}*`
 
       const response = await fetch("/api/orders", {
         method: "POST",
@@ -547,15 +552,38 @@ export default function CatalogPage() {
       setShowConfirmDialog(false)
       setIsAware(false)
 
-      // Redirecionar para o WhatsApp com a mensagem (mantido intacto para este projeto)
-      const whatsappNumber = '5518998048419'
-      const whatsappMessage = encodeURIComponent(message)
-      const whatsappUrl = `https://wa.me/${whatsappNumber}?text=${whatsappMessage}`
-      
-      window.location.href = whatsappUrl
+      // Determinar o destino configurado pelo admin (fallback: página de confirmação)
+      let destination: {
+        destination_type?: string
+        whatsapp_phone?: string
+        whatsapp_message?: string
+        redirect_url?: string
+      } = { destination_type: "confirmation" }
+      try {
+        const settingsRes = await fetch("/api/settings")
+        if (settingsRes.ok) {
+          destination = await settingsRes.json()
+        }
+      } catch {
+        // silencioso: mantém confirmation
+      }
 
-      // Redirecionar para a página de confirmação (comentado)
-      // router.push(`/confirmed/${customerData.orderNumber}`)
+      const type = destination.destination_type
+      const phone = (destination.whatsapp_phone || "").replace(/\D/g, "")
+      const url = (destination.redirect_url || "").trim()
+
+      if (type === "whatsapp" && phone) {
+        const template = destination.whatsapp_message || message
+        const filledMessage = template
+          .replaceAll("{nome}", customerName)
+          .replaceAll("{pedido}", orderNumber)
+          .replaceAll("{itens}", itemsText)
+        window.location.href = `https://wa.me/${phone}?text=${encodeURIComponent(filledMessage)}`
+      } else if (type === "url" && url) {
+        window.location.href = url
+      } else {
+        router.push(`/confirmed/${orderNumber}`)
+      }
     } catch (error) {
       console.error("Erro ao salvar pedido:", error)
       setError(error instanceof Error ? error.message : "Erro ao salvar pedido")

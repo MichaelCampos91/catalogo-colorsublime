@@ -125,6 +125,25 @@ export async function POST() {
     `)
     console.log("API: Tabelas production_batches e production_batch_orders criadas/verificadas")
 
+    // Tabela de configurações (destino pós-pedido) + seed idempotente
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+    `)
+    await client.query(
+      `INSERT INTO settings (key, value) VALUES
+        ('post_order_destination_type', 'confirmation'),
+        ('post_order_whatsapp_phone', '5518998048419'),
+        ('post_order_whatsapp_message', $1),
+        ('post_order_redirect_url', '')
+       ON CONFLICT (key) DO NOTHING`,
+      ["Olá! Meu nome é *{nome}* e esses são os temas que escolhi do catálogo:\n\n{itens} \n Nº do pedido: *{pedido}*"],
+    )
+    console.log("API: Tabela settings criada/verificada e semeada")
+
     // Inserir dados de exemplo apenas se não existirem
     const categoriesCount = await client.query("SELECT COUNT(*) FROM categories")
     if (Number.parseInt(categoriesCount.rows[0].count) === 0) {
